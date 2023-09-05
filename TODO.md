@@ -1,0 +1,4 @@
+- [X] Previous build of entire transformer from scratch
+- [ ] Build a decoder based model
+- [ ] Execute it
+- [ ] Add MLOps capability
