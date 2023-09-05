@@ -1,6 +1,11 @@
+###############################################################################################
+#
+# This code is from YouTube: https://www.youtube.com/watch?v=U0s0f995w14
+#
+###############################################################################################
+
 import torch
 import torch.nn as nn
-
 class SelfAttention(nn.Module):
     def __init__(self,embed_size,heads):
         super(SelfAttention,self).__init__()
@@ -10,6 +15,7 @@ class SelfAttention(nn.Module):
 
         assert(self.head_dim*heads==embed_size), "Embed size needs to be divisible by heads"
 
+        # Query, key and value matrices
         self.values=nn.Linear(self.head_dim,self.head_dim,bias=False)
         self.keys=nn.Linear(self.head_dim,self.head_dim,bias=False)
         self.queries=nn.Linear(self.head_dim,self.head_dim,bias=False)
@@ -19,24 +25,32 @@ class SelfAttention(nn.Module):
         N=query.shape[0]
         value_len,key_len,query_len=values.shape[1],keys.shape[1],query.shape[1]
 
-        # Split embedding into heads pieces
+        # Split embeddings into pieces for each attention head
         values=values.reshape(N,value_len,self.heads,self.head_dim)
         keys=keys.reshape(N,key_len,self.heads,self.head_dim)
         queries=query.reshape(N,query_len,self.heads,self.head_dim)
 
+        # Training Q,K,V matrix values
         values=self.values(values)
         keys=self.keys(keys)
         queries=self.queries(queries)
 
+        # Q * K^T
         energy=torch.einsum("nqhd,nkhd->nhqk",[queries,keys])
         #Queries shape: (N, query_len, heads, head_dim)
         #Keys shape: (N, key_len, heads, head_dim)
         #Energy shape: (N, heads, query_len, key_len)
 
+        # Masking sequences, for eg. target sequence masking
         if mask is not None:
             energy=energy.masked_fill(mask==0,float("-1e20"))
         
+        # Q * K^T/sqrt(D)
+        # You want all the keys' softmax to add to 1 hence dim=3
         attention=torch.softmax(energy/(self.embed_size**0.5), dim=3)
+        
+        # softmax(Q * K^T/sqrt(D)) * values
+        # Gives the attention weights against all the values for the particular query embedding
         out=torch.einsum("nhqk,nvhd->nqhd",[attention,values]).reshape(N, query_len, self.heads*self.head_dim)
         #attention shape: (N, heads, query_len, key_len)
         #values shape: (N, value_len, heads, heads_dim)
@@ -44,30 +58,30 @@ class SelfAttention(nn.Module):
 
         out=self.fc_out(out)
         return out
-    
 class TransformerBlock(nn.Module):
     def __init__(self,embed_size,heads,dropout,forward_expansion):
         super(TransformerBlock,self).__init__()
         self.attention=SelfAttention(embed_size,heads)
         self.norm1=nn.LayerNorm(embed_size)
-        self.norm2=nn.LayerNorm(embed_size)
 
         self.feed_forward=nn.Sequential(
             nn.Linear(embed_size,forward_expansion*embed_size),
             nn.ReLU(),
             nn.Linear(forward_expansion*embed_size,embed_size)
         )
-
+        self.norm2=nn.LayerNorm(embed_size)
         self.dropout=nn.Dropout(dropout)
 
     def forward(self,value,key,query,mask):
+
+        # In encoder, this mask enables not focusing on EOS tokens and stuff
+        # In decoder, it prevents looking ahead beyond current step
 
         attention=self.attention(value,key,query,mask)
         x=self.dropout(self.norm1(attention+query))
         forward=self.feed_forward(x)
         out=self.dropout(self.norm2(forward+x))
         return out
-    
 class Encoder(nn.Module):
     def __init__(
             self,
@@ -105,19 +119,15 @@ class Encoder(nn.Module):
 
     def forward(self,x,mask):
         N,seq_length=x.shape
-
         positions=torch.arange(0,seq_length).expand(N,seq_length).to(self.device)
-
-        out=self.dropout(self.word_embedding(x)+self.position_embedding(positions))
+        self.out=self.dropout(self.word_embedding(x)+self.position_embedding(positions))
 
         for layer in self.layers:
-            out=layer(out,out,out,mask)
+            self.out=layer(self.out,self.out,self.out,mask)
 
-        return out
-    
+        return self.out   
 class DecoderBlock(nn.Module):
-    def __init__(self,
-                 embed_size,heads, forward_expansion,dropout,device):
+    def __init__(self, embed_size,heads, forward_expansion,dropout,device):
         super(DecoderBlock,self).__init__()
         self.attention=SelfAttention(embed_size,heads)
         self.norm=nn.LayerNorm(embed_size)
@@ -129,12 +139,19 @@ class DecoderBlock(nn.Module):
 
     def forward(self,x,value,key,src_mask,trg_mask):
 
+        # Here x is the target. This attention is the self-attention 
+        # on the target upto current timestep.
         attention=self.attention(x,x,x,trg_mask)
         query=self.dropout(self.norm(attention+x))
+
+        # Main piece of the puzzle. Encoder-decoder attention.
+        # Query is from the decoder self-attention
+        # Key and value are from encoder
+        # Training mask has already been used to mask target upto current timestep
+        # Source mask is used to remove focus on EOS token and stuff
         out=self.transformer_block(value,key,query,src_mask)
 
-        return out
-    
+        return out 
 class Decoder(nn.Module):
     def __init__(
             self,
@@ -151,28 +168,28 @@ class Decoder(nn.Module):
         self.device=device
         self.word_embedding=nn.Embedding(trg_vocab_size,embed_size)
         self.position_embedding=nn.Embedding(max_length,embed_size)
+        self.dropout=nn.Dropout(dropout)
 
         self.layers=nn.ModuleList(
-            [DecoderBlock(embed_size, heads, forward_expansion,dropout, device)
-            for _ in range(num_layers) 
+            [
+                DecoderBlock(embed_size, heads, forward_expansion,dropout, device)
+                for _ in range(num_layers) 
             ]
         )
 
         self.fc_out=nn.Linear(embed_size,trg_vocab_size)
-        self.dropout=nn.Dropout(dropout)
 
     def forward(self,x,enc_out,src_mask,trg_mask):
 
         N,seq_length=x.shape
         positions=torch.arange(0,seq_length).expand(N,seq_length).to(self.device)
-        x=self.dropout(self.word_embedding(x)+self.position_embedding(positions))
+        self.x=self.dropout(self.word_embedding(x)+self.position_embedding(positions))
 
         for layer in self.layers:
-            x=layer(x,enc_out,enc_out,src_mask, trg_mask)
+            self.x=layer(self.x,enc_out,enc_out,src_mask,trg_mask)
 
-        out=self.fc_out(x)
+        out=self.fc_out(self.x)
         return out
-
 class Transformer(nn.Module):
     def __init__(self,
                 src_vocab_size,
@@ -217,27 +234,27 @@ class Transformer(nn.Module):
         self.device=device
 
     def make_src_mask(self,src):
+        # Masks EOS tokens and stuff
         src_mask=(src!=self.src_pad_idx).unsqueeze(1).unsqueeze(2)
-
         return src_mask.to(self.device)
     
     def make_trg_mask(self,trg):
+        # Masks all tokens looking ahead. In each time step, reveals one token in a lower triangular fashion.
         N,trg_len=trg.shape
         trg_mask=torch.tril(torch.ones((trg_len,trg_len))).expand(N,1,trg_len,trg_len)
         return trg_mask.to(self.device)
     
     def forward(self,src,trg):
-
         src_mask=self.make_src_mask(src)
         trg_mask=self.make_trg_mask(trg)
         enc_src=self.encoder(src,src_mask)
+        print("Size after encoder blocks,N,seq_len,embedding_size",enc_src.shape)
         out=self.decoder(trg,enc_src,src_mask,trg_mask)
         return out
-    
 
 if __name__=="__main__":
     device=torch.device("cpu")
-    x=torch.tensor([[1,5,6,4,3,9,5,2,0],[1,8,7,3,4,5,6,7,2]]).to(device)
+    x=torch.tensor([[1,5,6,4,3,9,5,2,0],[1,8,7,3,4,5,6,7,0]]).to(device)
     trg=torch.tensor([[1,7,4,3,5,9,2,0],[1,5,6,2,4,7,6,2]]).to(device)
     src_pad_idx=0
     trg_pad_idx=0
