@@ -1,4 +1,5 @@
+- [ ] Revise basics
 - [X] Previous build of entire transformer from scratch
-- [ ] Build a decoder based model
-- [ ] Execute it
-- [ ] Add MLOps capability
+- [X] Build GPT based model
+- [ ] Build Llama based model
+- [ ] Compare model architectures of popular models

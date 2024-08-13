@@ -125,7 +125,7 @@ class Encoder(nn.Module):
         for layer in self.layers:
             self.out=layer(self.out,self.out,self.out,mask)
 
-        return self.out   
+        return self.out
 class DecoderBlock(nn.Module):
     def __init__(self, embed_size,heads, forward_expansion,dropout,device):
         super(DecoderBlock,self).__init__()
